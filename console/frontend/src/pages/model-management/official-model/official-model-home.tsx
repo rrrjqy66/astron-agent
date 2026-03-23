@@ -10,6 +10,15 @@ import { useModelFilters } from '../hooks/use-model-filters';
 import { ModelProviderType } from '@/types/model';
 import { getModelProviderLabel } from '../utils/provider';
 import { mapProviderToVendor, getVendorOptions } from '../utils/provider-group';
+import chatgptIcon from '@/assets/imgs/modelManage/providers/custom/chatgpt.svg';
+import anthropicIcon from '@/assets/imgs/modelManage/providers/custom/anthropic.svg';
+import googleIcon from '@/assets/imgs/modelManage/providers/custom/google.svg';
+import deepseekIcon from '@/assets/imgs/modelManage/providers/custom/deepseek.svg';
+import minimaxIcon from '@/assets/imgs/modelManage/providers/custom/minimax.svg';
+import zhipuIcon from '@/assets/imgs/modelManage/providers/custom/zhipu.svg';
+import qwenIcon from '@/assets/imgs/modelManage/providers/custom/qwen.svg';
+import moonshotIcon from '@/assets/imgs/modelManage/providers/custom/moonshot.svg';
+import doubaoIcon from '@/assets/imgs/modelManage/providers/custom/doubao.svg';
 
 interface OfficialProviderCard {
   provider: ModelProviderType;
@@ -19,6 +28,43 @@ interface OfficialProviderCard {
   accentClass: string;
   endpoint: string;
 }
+
+const ProviderLogoGlyph: React.FC<{ provider: ModelProviderType }> = ({
+  provider,
+}) => {
+  const imageLogoMap: Record<ModelProviderType, string> = {
+    [ModelProviderType.CHATGPT]: chatgptIcon,
+    [ModelProviderType.OPENAI]: chatgptIcon,
+    [ModelProviderType.ANTHROPIC]: anthropicIcon,
+    [ModelProviderType.DEEPSEEK]: deepseekIcon,
+    [ModelProviderType.GOOGLE]: googleIcon,
+    [ModelProviderType.MINIMAX]: minimaxIcon,
+    [ModelProviderType.ZHIPU]: zhipuIcon,
+    [ModelProviderType.QWEN]: qwenIcon,
+    [ModelProviderType.MOONSHOT]: moonshotIcon,
+    [ModelProviderType.DOUBAO]: doubaoIcon,
+  };
+
+  return (
+    <img
+      src={imageLogoMap[provider]}
+      alt={getModelProviderLabel(provider)}
+      className="h-8 w-8 object-contain"
+    />
+  );
+};
+
+const ProviderLogoBadge: React.FC<{ provider: ModelProviderType }> = ({
+  provider,
+}) => {
+  return (
+    <div className="rounded-2xl border border-[#E7EBF4] bg-white px-3 py-3 shadow-[0_10px_24px_rgba(31,35,41,0.06)]">
+      <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-[14px] border border-[#EEF1F7] bg-white">
+        <ProviderLogoGlyph provider={provider} />
+      </div>
+    </div>
+  );
+};
 
 const OfficialModelContent: React.FC = () => {
   const { t } = useTranslation();
@@ -111,6 +157,24 @@ const OfficialModelContent: React.FC = () => {
     actions.setCurrentEditModel(undefined);
     setSelectedCard(card);
   };
+
+  const visibleCards = useMemo(() => {
+    const keyword = state.searchInput.trim().toLowerCase();
+
+    return providerCards.filter(card => {
+      const cardVendor = mapProviderToVendor(card.provider);
+      const matchedProvider =
+        !state.providerFilter || state.providerFilter === cardVendor;
+      const matchedKeyword =
+        !keyword ||
+        card.title.toLowerCase().includes(keyword) ||
+        card.subtitle.toLowerCase().includes(keyword) ||
+        card.description.toLowerCase().includes(keyword) ||
+        getModelProviderLabel(card.provider).toLowerCase().includes(keyword);
+
+      return matchedProvider && matchedKeyword;
+    });
+  }, [providerCards, state.providerFilter, state.searchInput]);
 
   return (
     <div className="w-full h-screen flex flex-col page-container-inner-UI">
