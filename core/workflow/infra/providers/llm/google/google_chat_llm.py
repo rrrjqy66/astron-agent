@@ -6,18 +6,11 @@ with Gemini models.
 """
 
 import json
-from typing import Any, AsyncIterator, Dict, List, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-# Import Google GenAI SDK with support for both deprecated and new package names
-try:
-    import google.genai as genai
-    from google.genai import GenerativeModel
-    from google.genai.types import AsyncGenerateContentResponse, Part, Content
-except ImportError:
-    # Fallback to deprecated package during transition period
-    import google.generativeai as genai
-    from google.generativeai import GenerativeModel
-    from google.generativeai.types import AsyncGenerateContentResponse, Part, Content
+# Import Google GenAI SDK (new package name)
+from google.genai import Client
+from google.genai.types import Content, Part, GenerateContentConfig
 
 from workflow.consts.engine.chat_status import ChatStatus
 from workflow.engine.nodes.entities.llm_response import LLMResponse
@@ -37,6 +30,23 @@ class GoogleChatAI(ChatAI):
     """
 
     model_config = {"arbitrary_types_allowed": True, "protected_namespaces": ()}
+
+    def __init__(self, **data):
+        """
+        Initialize GoogleChatAI and create the GenAI client.
+
+        Args:
+            **data: Configuration data including api_key, model_name, etc.
+        """
+        super().__init__(**data)
+        # Initialize the GenAI client once for reuse
+        self.client = Client(api_key=self.api_key)
+        
+        # Handle custom endpoint if provided
+        if self.model_url and self.model_url != "google-genai-sdk-placeholder":
+            # Note: Custom endpoint configuration may require additional setup
+            # depending on the specific endpoint requirements
+            pass
 
     def token_calculation(self, text: str) -> int:
         """Token calculation is not implemented for Google."""
@@ -59,12 +69,10 @@ class GoogleChatAI(ChatAI):
         Returns:
             Configured API URL or placeholder
         """
-        # If model_url is provided, use it as the base URL for Google client
         if self.model_url:
             await span.add_info_events_async({"google_base_url": self.model_url})
             return self.model_url
         else:
-            # For standard Google API, return a placeholder
             return "google-genai-sdk-placeholder"
 
     def assemble_payload(self, message: list) -> Dict[str, Any]:
@@ -81,8 +89,6 @@ class GoogleChatAI(ChatAI):
         Returns:
             Dictionary containing the formatted payload
         """
-        # This method is not needed when using the SDK directly
-        # The SDK handles message conversion internally
         system_parts: List[str] = []
         converted_messages: List[Dict[str, Any]] = []
 
@@ -98,7 +104,6 @@ class GoogleChatAI(ChatAI):
 
             # Handle image content
             if content_type == "image":
-                # For image content, we convert to the format expected by Google GenAI
                 converted_messages.append({
                     "role": "user",
                     "parts": [
@@ -150,7 +155,10 @@ class GoogleChatAI(ChatAI):
 
         return status, content, reasoning_content, token_usage
 
-    async def _convert_messages_to_genai_format(self, message: list) -> List[Content]:
+    async def _convert_messages_to_genai_format(
+        self, 
+        message: list
+    ) -> Tuple[List[Content], Optional[str]]:
         """
         Convert the internal message format to Google GenAI format.
 
@@ -161,17 +169,18 @@ class GoogleChatAI(ChatAI):
             message: List of message objects with role, content, and content_type
 
         Returns:
-            List of Content objects formatted for Google GenAI
+            Tuple of (List of Content objects, system_instruction)
         """
-        contents = []
+        contents: List[Content] = []
+        system_parts: List[str] = []
 
         for item in message:
             role = item.get("role", "user")
             content_type = item.get("content_type", "text")
 
-            # Skip system messages as they are handled separately
+            # Collect system messages
             if role == "system":
-                # System instructions are handled separately
+                system_parts.append(str(item.get("content", "")))
                 continue
 
             if content_type == "image":
@@ -179,20 +188,25 @@ class GoogleChatAI(ChatAI):
                 image_data = item.get("content", "")
                 if isinstance(image_data, str):
                     # Assuming it's base64 encoded image data
-                    part = Part.from_data(mime_type="image/jpeg", data=image_data)
-                else:
-                    # Handle other formats if needed
-                    continue
-                contents.append(Content(role="user", parts=[part]))
+                    try:
+                        part = Part.from_data(mime_type="image/jpeg", data=image_data)
+                        contents.append(Content(role="user", parts=[part]))
+                    except Exception as e:
+                        # Log error but continue
+                        print(f"Error processing image: {e}")
+                        continue
             else:
                 # Handle text content
                 text_content = str(item.get("content", ""))
-                contents.append(Content(
-                    role="user" if role != "assistant" else "model",
-                    parts=[text_content]
-                ))
+                if text_content:  # Only add non-empty text
+                    # Use Part.from_text for text content
+                    part = Part.from_text(text=text_content)
+                    # Map roles: 'assistant' -> 'model', 'user' -> 'user'
+                    mapped_role = "model" if role == "assistant" else "user"
+                    contents.append(Content(role=mapped_role, parts=[part]))
 
-        return contents
+        system_instruction = "\n".join(system_parts) if system_parts else None
+        return contents, system_instruction
 
     async def _recv_messages(
         self,
@@ -218,56 +232,70 @@ class GoogleChatAI(ChatAI):
         Yields:
             LLMResponse objects containing normalized API responses
         """
-        # Configure the API key and potentially custom client options for Google GenAI
-        # If a custom URL is provided, we use client_options to configure it
-        if url and url != "google-genai-sdk-placeholder":
-            # Use client_options to configure a custom endpoint
-            genai.configure(api_key=self.api_key, client_options={"api_endpoint": url})
-        else:
-            # Standard Google API configuration
-            genai.configure(api_key=self.api_key)
+        # Convert messages to Google GenAI format
+        contents, system_instruction = await self._convert_messages_to_genai_format(user_message)
 
-        # Create the generative model instance with potential system instruction
-        model = GenerativeModel(
-            model_name=self.model_name,
-            system_instruction=extra_params.get("system_instruction") if "system_instruction" in extra_params else None
-        )
-
-        # Convert messages to the format expected by Google GenAI
-        contents = await self._convert_messages_to_genai_format(user_message)
-
-        # Prepare generation configuration with base parameters
-        generation_config = {
-            "max_output_tokens": self.max_tokens,
-            "temperature": self.temperature,
-        }
-
-        # Update with any extra parameters
-        if extra_params:
-            for key, value in extra_params.items():
-                if key not in ['system_instruction', 'messages']:  # Skip these as they're handled separately
-                    generation_config[key] = value
-
-        # Set up safety settings (default to none for now, but can be customized)
-        safety_settings = None
-
-        try:
-            # Create the async stream with specified configuration
-            response: AsyncGenerateContentResponse = await model.generate_content_async(
-                contents,
-                generation_config=generation_config,
-                safety_settings=safety_settings,
-                stream=True
+        # Validate we have content to send
+        if not contents:
+            raise CustomException(
+                err_code=CodeEnum.OPEN_AI_REQUEST_ERROR,
+                err_msg="No valid content to send to Google API",
+                cause_error="Empty content after conversion",
             )
 
-            # Process the streamed response chunks
-            async for chunk in await response.async_iter():
-                # Extract text from the chunk
-                text = chunk.text if hasattr(chunk, 'text') else ''
+        # Build generation configuration
+        generation_config = GenerateContentConfig(
+            max_output_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
 
-                # Calculate usage info (this might not be available in streaming chunks)
-                usage = {}
-                if hasattr(chunk, 'usage_metadata'):
+        # Add system instruction if present
+        if system_instruction:
+            generation_config.system_instruction = system_instruction
+
+        # Handle extra parameters
+        if extra_params:
+            # Map common parameters to GenerateContentConfig fields
+            param_mapping = {
+                "top_p": "top_p",
+                "top_k": "top_k",
+                "candidate_count": "candidate_count",
+                "stop_sequences": "stop_sequences",
+                "presence_penalty": "presence_penalty",
+                "frequency_penalty": "frequency_penalty",
+            }
+            
+            for extra_key, config_key in param_mapping.items():
+                if extra_key in extra_params:
+                    setattr(generation_config, config_key, extra_params[extra_key])
+            
+            # Handle response_mime_type if specified
+            if "response_mime_type" in extra_params:
+                generation_config.response_mime_type = extra_params["response_mime_type"]
+
+        try:
+            usage = {}  # Initialize usage dict
+            
+            # Use the async streaming method from the client
+            async for chunk in self.client.aio.models.generate_content_stream(
+                model=self.model_name,
+                contents=contents,
+                config=generation_config,
+            ):
+                # Extract text from chunk
+                text = ""
+                if hasattr(chunk, 'text') and chunk.text:
+                    text = chunk.text
+                elif hasattr(chunk, 'candidates') and chunk.candidates:
+                    # Alternative way to extract text from response
+                    candidate = chunk.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'text'):
+                                text += part.text
+
+                # Extract usage metadata if available
+                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
                     usage_metadata = chunk.usage_metadata
                     usage = {
                         "prompt_tokens": getattr(usage_metadata, 'prompt_token_count', 0),
@@ -275,13 +303,13 @@ class GoogleChatAI(ChatAI):
                         "total_tokens": getattr(usage_metadata, 'total_token_count', 0),
                     }
 
-                # Create normalized response structure similar to OpenAI
+                # Build normalized response structure similar to OpenAI
                 normalized_response = {
                     "choices": [
                         {
                             "delta": {
                                 "content": text,
-                                "reasoning_content": "",  # Google doesn't typically provide separate reasoning in streams
+                                "reasoning_content": "",  # Google doesn't provide reasoning in streams
                             },
                             "finish_reason": None,  # Will be set on final chunk
                         }
@@ -305,7 +333,7 @@ class GoogleChatAI(ChatAI):
                         "finish_reason": ChatStatus.FINISH_REASON.value,
                     }
                 ],
-                "usage": usage,  # Final usage statistics
+                "usage": usage,
             }
 
             await span.add_info_events_async(
@@ -362,7 +390,7 @@ class GoogleChatAI(ChatAI):
                 event_log_node_trace.append_config_data(
                     {
                         "model_name": self.model_name,
-                        "base_url": url,  # Log the base URL used
+                        "base_url": url,
                         "message": user_message,
                         "extra_params": extra_params,
                     }
@@ -378,6 +406,7 @@ class GoogleChatAI(ChatAI):
                         json.dumps(msg.msg, ensure_ascii=False)
                     )
                 yield msg
+                
         except CustomException as e:
             raise e
         except Exception as e:
