@@ -198,6 +198,18 @@ class SparkLLMNode(BaseLLMNode):
                     else None
                 )
             flow_id = callbacks.flow_id if callbacks else ""
+            # Extract multimodal inputs from the inputs
+            multimodal_inputs = []
+            for key, value in inputs.items():
+                # Check if the input is a multimodal input
+                if isinstance(value, dict) and 'fileType' in value and 'id' in value:
+                    file_type = value.get('fileType', '')
+                    if file_type in ['image', 'video', 'audio']:
+                        multimodal_inputs.append({
+                            'type': file_type,
+                            'url': value.get('url', '') or value.get('link', '') or str(value)
+                        })
+
             token_usage, res, think_contents, processed_history = (
                 await self._chat_with_llm(
                     span=span,
@@ -211,6 +223,7 @@ class SparkLLMNode(BaseLLMNode):
                     image_url=image_url,
                     stream=True,
                     msg_or_end_node_deps=msg_or_end_node_deps,
+                    multimodal_inputs=multimodal_inputs  # Pass multimodal inputs
                 )
             )
 
